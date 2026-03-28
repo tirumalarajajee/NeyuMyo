@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Cheek Exercise</title>
+
+  <!-- MediaPipe -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <style>
+    body {
+      margin: 0;
+      background: #111;
+      color: white;
+      font-family: Arial;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    canvas {
+      margin-top: 10px;
+      border-radius: 12px;
+      max-width: 90vw;
+    }
+
+    #ui {
+      width: 300px;
+      margin-top: 15px;
+      text-align: center;
+    }
+
+    #barContainer {
+      background: #444;
+      height: 20px;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    #bar {
+      height: 100%;
+      width: 0%;
+      background: limegreen;
+    }
+
+    #emoji {
+      font-size: 50px;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+
+<body>
+
+<video id="video" style="display:none"></video>
+<canvas id="output"></canvas>
+
+<div id="ui">
+  <div id="stepText">Starting...</div>
+
+  <div id="barContainer">
+    <div id="bar"></div>
+  </div>
+
+  <div id="emoji">🙂</div>
+  <div id="debug"></div>
+  <button onclick="resetCalib()">Recalibrate</button>
+  <button onclick="confirmReset()">Recalibrate</button>
+</div>
+
+<!-- ✅ GLOBAL VARIABLES (CRITICAL FIX) -->
+<script>
+const video = document.getElementById("video");
+const canvas = document.getElementById("output");
+const ctx = canvas.getContext("2d");
+
+const bar = document.getElementById("bar");
+const emoji = document.getElementById("emoji");
+const stepText = document.getElementById("stepText");
+const debug = document.getElementById("debug");
+
+// REQUIRED GLOBALS from your original code
+let zBufferL = [];
+let zBufferR = [];
+let expansionBuffer = [];
+
+let stepIndex = 0;
+let holdStart = null;
+let holdTime = 0;
+
+const STEPS = ["LEFT","RIGHT","FULL","UPPER_LIP","LOWER_LIP"];
+
+// ==============================
+// LANDMARK INDEX MAP (REQUIRED)
+// ==============================
+const IDX = {
+  NOSE: 1,
+
+  CHEEK_Z_LEFT: 234,
+  CHEEK_Z_RIGHT: 454,
+
+  CHEEK_WIDTH_LEFT: 207,
+  CHEEK_WIDTH_RIGHT: 427,
+
+  UPPER_LEFT: 50,
+  UPPER_RIGHT: 280,
+
+  LIP_LEFT: 61,
+  LIP_RIGHT: 291,
+
+  REF_LEFT: 93,
+  REF_RIGHT: 323,
+
+  UPPER_LIP: 13,
+  LOWER_LIP: 14
+};
+</script>
+<script>
+// ==============================
+// REQUIRED HELPER FUNCTIONS
+// ==============================
+
+function confirmReset(){
+  if(confirm("Reset calibration?")){
+    localStorage.removeItem("_fc1");
+    location.reload();
+  }
+}
+
+
+function drawHeatmap(lm, ctx, canvas) {
+  for (let i = 0; i < lm.length; i++) {
+    const p = lm[i];
+
+    const intensity = Math.min(Math.abs(p.z) * 50, 1);
+
+    const x = p.x * canvas.width;
+    const y = p.y * canvas.height;
+
+    const r = Math.floor(255 * intensity);
+    const g = Math.floor(255 * (1 - intensity));
+
+    ctx.beginPath();
+    ctx.arc(x, y, 2, 0, 2 * Math.PI);
+    ctx.fillStyle = `rgb(${r},${g},0)`;
+    ctx.fill();
+  }
+}
+
+function speak(text) {
+  const utter = new SpeechSynthesisUtterance(text);
+  speechSynthesis.cancel();
+  speechSynthesis.speak(utter);
+}
+
+function speakFeedback(feedback) {
+  const msg = feedback.join(", ");
+  if (msg) speak(msg);
+}
+
+function guideStep() {
+  const step = STEPS[stepIndex];
+
+  if (step === "LEFT") speak("Puff your left cheek");
+  else if (step === "RIGHT") speak("Puff your right cheek");
+  else if (step === "FULL") speak("Puff both cheeks");
+  else if (step === "UPPER_LIP") speak("Puff your upper lip");
+  else if (step === "LOWER_LIP") speak("Puff your lower lip");
+}
+
+function generateFeedback(values, state) {
+  return []; // keep simple for now
+}
+
+</script>
+<!-- ✅ YOUR MINIFIED LOGIC -->
+<script src="app.min.js"></script>
+
+</body>
+
+</html>
