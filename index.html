@@ -3,7 +3,6 @@
 <head>
   <title>Cheek Exercise</title>
 
-  <!-- MediaPipe -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 
@@ -12,7 +11,7 @@
       margin: 0;
       background: #111;
       color: white;
-      font-family: Arial;
+      font-family: Arial, sans-serif;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -22,12 +21,18 @@
       margin-top: 10px;
       border-radius: 12px;
       max-width: 90vw;
+      height: auto;
     }
 
     #ui {
       width: 300px;
       margin-top: 15px;
       text-align: center;
+    }
+
+    #stepText {
+      font-size: 18px;
+      margin-bottom: 10px;
     }
 
     #barContainer {
@@ -41,11 +46,18 @@
       height: 100%;
       width: 0%;
       background: limegreen;
+      transition: width 0.2s;
     }
 
     #emoji {
       font-size: 50px;
       margin-top: 10px;
+    }
+
+    #debug {
+      font-size: 12px;
+      margin-top: 8px;
+      opacity: 0.6;
     }
   </style>
 </head>
@@ -53,9 +65,11 @@
 <body>
 
 <video id="video" style="display:none"></video>
+
 <canvas id="output"></canvas>
 
 <div id="ui">
+
   <div id="stepText">Starting...</div>
 
   <div id="barContainer">
@@ -63,13 +77,18 @@
   </div>
 
   <div id="emoji">🙂</div>
+
   <div id="debug"></div>
-  <button onclick="resetCalib()">Recalibrate</button>
-  <button onclick="confirmReset()">Recalibrate</button>
+
 </div>
 
-<!-- ✅ GLOBAL VARIABLES (CRITICAL FIX) -->
+</body>
+
 <script>
+
+// ==============================
+// UI ELEMENTS
+// ==============================
 const video = document.getElementById("video");
 const canvas = document.getElementById("output");
 const ctx = canvas.getContext("2d");
@@ -79,59 +98,81 @@ const emoji = document.getElementById("emoji");
 const stepText = document.getElementById("stepText");
 const debug = document.getElementById("debug");
 
-// REQUIRED GLOBALS from your original code
-let zBufferL = [];
-let zBufferR = [];
-let expansionBuffer = [];
-
-let stepIndex = 0;
-let holdStart = null;
-let holdTime = 0;
-
-const STEPS = ["LEFT","RIGHT","FULL","UPPER_LIP","LOWER_LIP"];
 
 // ==============================
-// LANDMARK INDEX MAP (REQUIRED)
+// CONFIG
+// ==============================
+const STEPS = ["LEFT", "RIGHT", "FULL"];
+let stepIndex = 0;
+
+const HOLD_REQUIRED = 2.5; // seconds
+let holdStart = null;
+
+const SMOOTH_WINDOW = 5;
+//const NOISE_THRESHOLD = 0.0012;   // more sensitive
+//const PUFF_THRESHOLD = 0.0035;    // easier detection
+//const NOISE_THRESHOLD = 0.0001;   // more sensitive
+//const PUFF_THRESHOLD = 0.0005;    // easier detection
+const NOISE_L = 0.001;
+const NOISE_R = 0.0002;
+
+//const PUFF_THRESHOLD = 0.0008;
+const PUFF_THRESHOLD = 0.005;
+const FULL_THRESHOLD = 0.0001;
+const SCALE_L = 1.0;
+const SCALE_R = 2.0;
+
+let expansionBuffer = [];
+const BUFFER_SIZE = 20;
+
+
+
+// ==============================
+// LANDMARK INDICES
 // ==============================
 const IDX = {
   NOSE: 1,
 
+  // 🔹 Z-based detection (LEFT / RIGHT)
   CHEEK_Z_LEFT: 234,
   CHEEK_Z_RIGHT: 454,
 
+  // 🔹 Width-based detection (FULL puff)
   CHEEK_WIDTH_LEFT: 207,
   CHEEK_WIDTH_RIGHT: 427,
 
+  // 🔹 Upper face (optional future use)
   UPPER_LEFT: 50,
   UPPER_RIGHT: 280,
 
+  // 🔹 Lip (asymmetry)
   LIP_LEFT: 61,
   LIP_RIGHT: 291,
 
+  // 🔹 Stable anchors (symmetry)
   REF_LEFT: 93,
-  REF_RIGHT: 323,
-
-  UPPER_LIP: 13,
-  LOWER_LIP: 14
+  REF_RIGHT: 323
 };
-</script>
-<script>
+
+
 // ==============================
-// REQUIRED HELPER FUNCTIONS
+// STATE
 // ==============================
+let baseline = null;
 
-function confirmReset(){
-  if(confirm("Reset calibration?")){
-    localStorage.removeItem("_fc1");
-    location.reload();
-  }
-}
+let zBufferL = [];
+let zBufferR = [];
+let lipBuffer = [];
 
 
+// ==============================
+// UTILS
+// ==============================
 function drawHeatmap(lm, ctx, canvas) {
   for (let i = 0; i < lm.length; i++) {
     const p = lm[i];
 
+    // use Z displacement as local deformation
     const intensity = Math.min(Math.abs(p.z) * 50, 1);
 
     const x = p.x * canvas.width;
@@ -142,40 +183,348 @@ function drawHeatmap(lm, ctx, canvas) {
 
     ctx.beginPath();
     ctx.arc(x, y, 2, 0, 2 * Math.PI);
-    ctx.fillStyle = `rgb(${r},${g},0)`;
+    ctx.fillStyle = `rgb(${r},${g},0)`; // red = more expansion
     ctx.fill();
   }
 }
-
-function speak(text) {
-  const utter = new SpeechSynthesisUtterance(text);
-  speechSynthesis.cancel();
-  speechSynthesis.speak(utter);
+function push(buffer, value) {
+  buffer.push(value);
+  if (buffer.length > SMOOTH_WINDOW) buffer.shift();
 }
 
-function speakFeedback(feedback) {
-  const msg = feedback.join(", ");
-  if (msg) speak(msg);
+function avg(arr) {
+  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 }
 
-function guideStep() {
-  const step = STEPS[stepIndex];
-
-  if (step === "LEFT") speak("Puff your left cheek");
-  else if (step === "RIGHT") speak("Puff your right cheek");
-  else if (step === "FULL") speak("Puff both cheeks");
-  else if (step === "UPPER_LIP") speak("Puff your upper lip");
-  else if (step === "LOWER_LIP") speak("Puff your lower lip");
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
 }
 
-function generateFeedback(values, state) {
-  return []; // keep simple for now
+
+// ==============================
+// CORE PROCESSING
+// ==============================
+function processFace(lm) {
+  const nose = lm[IDX.NOSE];
+
+  // ------------------------------
+  // UTILS
+  // ------------------------------
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+  // ------------------------------
+  // LANDMARK EXTRACTION
+  // ------------------------------
+
+  // Z-based cheeks (LEFT / RIGHT detection)
+  const cheekZLeft = lm[IDX.CHEEK_Z_LEFT];
+  const cheekZRight = lm[IDX.CHEEK_Z_RIGHT];
+
+  // Width-based cheeks (FULL detection)
+  const cheekWLeft = lm[IDX.CHEEK_WIDTH_LEFT];
+  const cheekWRight = lm[IDX.CHEEK_WIDTH_RIGHT];
+
+  // Reference points (symmetry)
+  const refLeft = lm[IDX.REF_LEFT];
+  const refRight = lm[IDX.REF_RIGHT];
+
+  // Lip
+  const lipLeftX = lm[IDX.LIP_LEFT].x - nose.x;
+  const lipRightX = lm[IDX.LIP_RIGHT].x - nose.x;
+
+  const lipShift = lipLeftX - lipRightX;
+
+  // ------------------------------
+  // Z VALUES (LEFT / RIGHT)
+  // ------------------------------
+  const leftZ = cheekZLeft.z - nose.z;
+  const rightZ = cheekZRight.z - nose.z;
+
+  // ------------------------------
+  // WIDTH (FULL PUFF)
+  // ------------------------------
+  const currentWidth = dist(cheekWLeft, cheekWRight);
+
+  // ------------------------------
+  // BASELINE (FIRST)
+  // ------------------------------
+  if (!baseline) {
+    baseline = {
+      leftZ,
+      rightZ,
+      lipShift,
+      width: currentWidth
+    };
+    return { state: "CALIBRATING" };
+  }
+
+  // ------------------------------
+  // DELTA
+  // ------------------------------
+  let dL = leftZ - baseline.leftZ;
+  let dR = rightZ - baseline.rightZ;
+  let dLip = lipShift - baseline.lipShift;
+
+  // ------------------------------
+  // NOISE FILTER
+  // ------------------------------
+  if (Math.abs(dL) < NOISE_L) dL = 0;
+  if (Math.abs(dR) < NOISE_R) dR = 0;
+
+  // ------------------------------
+  // SMOOTHING
+  // ------------------------------
+  push(zBufferL, dL);
+  push(zBufferR, dR);
+  push(lipBuffer, dLip);
+
+  const sL = avg(zBufferL);
+  const sR = avg(zBufferR);
+  const sLip = avg(lipBuffer);
+
+  // ------------------------------
+  // WIDTH EXPANSION (FULL)
+  // ------------------------------
+  const expansion = baseline.width
+    ? (currentWidth - baseline.width) / baseline.width
+    : 0;
+
+  expansionBuffer.push(expansion);
+  if (expansionBuffer.length > BUFFER_SIZE) expansionBuffer.shift();
+
+  const mean =
+    expansionBuffer.reduce((a, b) => a + b, 0) / expansionBuffer.length;
+
+  const std = Math.sqrt(
+    expansionBuffer.reduce((a, b) => a + (b - mean) ** 2, 0) /
+      expansionBuffer.length
+  );
+
+  // ------------------------------
+  // LIGHTING COMPENSATION
+  // ------------------------------
+  const avgZ = (sL + sR) / 2;
+
+  const relL = sL - avgZ;
+  const relR = sR - avgZ;
+
+  const normL = relL * SCALE_L;
+  const normR = relR * SCALE_R;
+
+  // ------------------------------
+  // SYMMETRY
+  // ------------------------------
+  const leftDist = dist(cheekWLeft, refLeft);
+  const rightDist = dist(cheekWRight, refRight);
+
+  const symmetry =
+    1 - Math.abs(leftDist - rightDist) / Math.max(leftDist, rightDist);
+
+  // ------------------------------
+  // DETECTION
+  // ------------------------------
+  let state = "RELAXED";
+
+  // FULL (priority → width-based)
+  if (expansion > 0.04) {
+    state = "FULL";
+  }
+  // LEFT
+  else if (normL > PUFF_THRESHOLD) {
+    state = "LEFT";
+  }
+  // RIGHT
+  else if (normR > PUFF_THRESHOLD) {
+    state = "RIGHT";
+  }
+
+  // ------------------------------
+  // ADAPTIVE BASELINE
+  // ------------------------------
+  const ADAPT_RATE = 0.005;
+
+  if (state === "RELAXED") {
+    baseline.leftZ =
+      baseline.leftZ * (1 - ADAPT_RATE) + leftZ * ADAPT_RATE;
+
+    baseline.rightZ =
+      baseline.rightZ * (1 - ADAPT_RATE) + rightZ * ADAPT_RATE;
+
+    baseline.width =
+      baseline.width * (1 - ADAPT_RATE) + currentWidth * ADAPT_RATE;
+  }
+
+  // ------------------------------
+  // CONFIDENCE
+  // ------------------------------
+  const confidence = clamp(
+    Math.max(Math.abs(normL), Math.abs(normR), expansion),
+    0,
+    1
+  );
+
+  // ------------------------------
+  // RETURN
+  // ------------------------------
+  return {
+    state,
+    confidence,
+    values: {
+      sL: normL,
+      sR: normR,
+      sLip,
+      expansion,
+      symmetry,
+      stability: std
+    }
+  };
+}
+
+// ==============================
+// STEP LOGIC
+// ==============================
+function updateStep(state) {
+  if (stepIndex >= STEPS.length) return;
+
+  const expected = STEPS[stepIndex];
+
+  // ------------------------------
+  // MATCH CONDITION (no confidence block)
+  // ------------------------------
+  if (state === expected) {
+
+    if (!holdStart) {
+      holdStart = Date.now();
+    }
+
+    const elapsed = (Date.now() - holdStart) / 1000;
+
+    // ------------------------------
+    // PROGRESS BAR
+    // ------------------------------
+    bar.style.width = `${Math.min((elapsed / HOLD_REQUIRED) * 100, 100)}%`;
+
+    // ------------------------------
+    // STEP COMPLETE
+    // ------------------------------
+    if (elapsed >= HOLD_REQUIRED) {
+      stepIndex++;
+      holdStart = null;
+      bar.style.width = "0%";
+    }
+
+  } else {
+
+    // ------------------------------
+    // SOFT RESET (important)
+    // ------------------------------
+    if (holdStart) {
+      const elapsed = (Date.now() - holdStart) / 1000;
+
+      // allow small interruption (0.5 sec tolerance)
+      if (elapsed < 0.5) return;
+    }
+
+    holdStart = null;
+    bar.style.width = "0%";
+  }
+}
+
+
+// ==============================
+// UI UPDATE
+// ==============================
+function updateUI(output) {
+  const { state, confidence, values } = output;
+
+  // Step text
+  stepText.innerHTML =
+    stepIndex < STEPS.length
+      ? `Do ${STEPS[stepIndex]} puff`
+      : "Done 🎉";
+
+  // Emoji
+  let e = "🙂";
+
+  if (stepIndex >= STEPS.length) {
+    e = "🏆";
+  } else if (state === STEPS[stepIndex] && confidence > 0.7) {
+    e = "😄";
+  } else if (state === STEPS[stepIndex]) {
+    e = "😐";
+  } else if (state !== "RELAXED") {
+    e = "🤔";
+  }
+
+  emoji.innerHTML = e;
+
+  // Debug
+  debug.innerHTML = `
+  L: ${values.sL.toFixed(5)}<br>
+  R: ${values.sR.toFixed(5)}<br>
+  Expansion: ${values.expansion.toFixed(4)}<br>
+  Symmetry: ${values.symmetry.toFixed(2)}<br>
+  Stability: ${values.stability.toFixed(3)}<br>
+  State: ${state}
+`;
+}
+
+
+// ==============================
+// MEDIAPIPE INIT (FIX)
+// ==============================
+const faceMesh = new FaceMesh({
+  locateFile: (file) => {
+    return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+  }
+});
+
+faceMesh.setOptions({
+  maxNumFaces: 1,
+  refineLandmarks: true,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+
+faceMesh.onResults(onResults);
+
+
+// ==============================
+// CAMERA INIT (FIX)
+// ==============================
+const camera = new Camera(video, {
+  onFrame: async () => {
+    await faceMesh.send({ image: video });
+  },
+  width: 640,
+  height: 480
+});
+
+camera.start();
+
+
+// ==============================
+// CANVAS DRAW (optional but needed visually)
+// ==============================
+function onResults(results) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+
+  ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+  if (!results.multiFaceLandmarks.length) return;
+
+  const lm = results.multiFaceLandmarks[0];
+
+  const output = processFace(lm);
+  if (!output || output.state === "CALIBRATING") return;
+drawHeatmap(lm, ctx, canvas);
+  updateStep(output.state);
+  updateUI(output);
 }
 
 </script>
-<!-- ✅ YOUR MINIFIED LOGIC -->
-<script src="app.min.js"></script>
-
 </body>
-
 </html>
